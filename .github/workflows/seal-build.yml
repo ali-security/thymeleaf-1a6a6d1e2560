@@ -1,0 +1,76 @@
+name: seal-build
+
+# Thymeleaf ships no build/test workflow upstream (only an issue labeler).
+# This workflow follows BUILD.txt (Maven 3, from the project root) and builds
+# the lib/* reactor together with the tests/* suites that exercise it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional surefire -Dtest selector; empty runs the full suite"
+        required: false
+        default: ""
+
+env:
+  MODULES: lib/thymeleaf,lib/thymeleaf-spring5,lib/thymeleaf-spring6,lib/thymeleaf-extras-springsecurity5,lib/thymeleaf-extras-springsecurity6,tests/thymeleaf-tests-core,tests/thymeleaf-tests-spring5,tests/thymeleaf-tests-spring6,tests/thymeleaf-tests-springsecurity5,tests/thymeleaf-tests-springsecurity6
+  MAVEN_OPTS: -Xmx3g
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Set up Maven 3.9.14
+        uses: stCarolas/setup-maven@v5
+        with:
+          maven-version: 3.9.14
+
+      - name: Build and test
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            mvn -B -e install -pl "$MODULES" -am -Dgpg.skip=true \
+              -Dtest='${{ inputs.test-filter }}' -Dsurefire.failIfNoSpecifiedTests=false
+          else
+            mvn -B -e install -pl "$MODULES" -am -Dgpg.skip=true
+          fi
+
+      - name: Test summary
+        if: success() || failure()
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import glob, xml.etree.ElementTree as ET
+          total = fail = err = skip = 0
+          skipped = []
+          for f in sorted(glob.glob("**/target/surefire-reports/TEST-*.xml", recursive=True)):
+              r = ET.parse(f).getroot()
+              total += int(r.get("tests", 0)); fail += int(r.get("failures", 0))
+              err += int(r.get("errors", 0)); skip += int(r.get("skipped", 0))
+              for tc in r.iter("testcase"):
+                  s = tc.find("skipped")
+                  if s is not None:
+                      msg = (s.get("message") or "disabled/ignored in upstream source").strip()
+                      skipped.append(f"{tc.get('classname')}.{tc.get('name')}: {msg}")
+          print("=== Skipped tests ===")
+          for s in skipped:
+              print("SKIPPED " + s)
+          print(f"TOTAL tests={total} passed={total-fail-err-skip} failures={fail} errors={err} skipped={skip}")
+          EOF
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thymeleaf-jar
+          path: lib/thymeleaf/target/thymeleaf-3.1.5.RELEASE.jar
+          if-no-files-found: error
